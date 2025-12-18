@@ -1,4 +1,15 @@
-# Qwen3 训练脚本参数详细说明
+# Qwen3-8B 训练脚本参数详细说明
+
+## 脚本概览
+
+本项目包含两个训练脚本：
+
+| 脚本 | 训练方式 | 适用场景 | 预计时间 |
+|------|---------|---------|---------|
+| `train_qwen3_lora.sh` | LoRA 微调 | 快速实验、显存有限 | 5-10 分钟 |
+| `train_qwen3_lora_fixed.sh` | 全参数微调 | 追求最佳效果 | 10-15 分钟 |
+
+---
 
 ## 一、环境变量
 
@@ -28,6 +39,15 @@ export CUDA_VISIBLE_DEVICES=1,3,5
 # 不使用任何 GPU（强制使用 CPU）
 export CUDA_VISIBLE_DEVICES=""
 ```
+
+### `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
+
+**作用**：优化 PyTorch 的 CUDA 显存分配策略。
+
+**详细说明**：
+- 启用可扩展内存段，减少显存碎片化
+- 当显存紧张时，可以更有效地利用剩余显存
+- 避免 "CUDA out of memory" 错误
 
 ---
 
@@ -97,44 +117,47 @@ torchrun --nproc_per_node=5 --no_python swift sft
 
 ### 3.1 模型相关参数
 
-#### `--model Qwen/Qwen3-30B-A3B-Thinking-2507`
+#### `--model Qwen/Qwen3-8B`
 
 **作用**：指定要微调的基座模型。
 
 **详细说明**：
-- 可以是 Hugging Face Hub 上的模型 ID（如这里的 `Qwen/Qwen3-30B-A3B-Thinking-2507`）
-- 也可以是本地模型路径（如 `/data/models/qwen3-30b`）
-- Swift 会自动从 Hugging Face 下载模型（如果本地没有）
+- 可以是 Hugging Face Hub 上的模型 ID（如这里的 `Qwen/Qwen3-8B`）
+- 也可以是本地模型路径（如 `/data/models/qwen3-8b`）
+- Swift 会自动从 Hugging Face 或 ModelScope 下载模型（如果本地没有）
 
-**模型命名解析**：
-- `Qwen3`: Qwen 第三代模型
-- `30B`: 300 亿参数
-- `A3B`: 激活参数约 3B（MoE 架构）
-- `Thinking`: 思考/推理增强版本
-- `2507`: 2025 年 7 月版本
+**常用 Qwen3 模型**：
+| 模型 | 参数量 | 显存需求 (LoRA) | 显存需求 (全参数) |
+|------|--------|----------------|------------------|
+| Qwen/Qwen3-0.6B | 0.6B | ~2GB | ~5GB |
+| Qwen/Qwen3-1.7B | 1.7B | ~4GB | ~10GB |
+| Qwen/Qwen3-4B | 4B | ~8GB | ~20GB |
+| Qwen/Qwen3-8B | 8B | ~15GB | ~35GB |
+| Qwen/Qwen3-14B | 14B | ~25GB | ~60GB |
+| Qwen/Qwen3-30B-A3B | 30B | ~30GB | ~120GB |
 
 **示例**：
 ```bash
 # 使用 Hugging Face 模型
---model Qwen/Qwen2.5-7B-Instruct
+--model Qwen/Qwen3-8B
 
 # 使用本地模型
---model /data/models/qwen2.5-7b
+--model /data/models/qwen3-8b
 ```
 
 ---
 
-#### `--train_type full`
+#### `--train_type lora` / `--train_type full`
 
 **作用**：指定训练类型/微调方式。
 
 **详细说明**：
 
-| 训练类型 | 说明 | 显存占用 | 训练效果 |
-|---------|------|---------|---------|
-| `full` | 全参数微调，更新模型所有参数 | 最高 | 最好 |
-| `lora` | LoRA 微调，只训练低秩适配器 | 较低 | 较好 |
-| `qlora` | 量化 LoRA，4-bit 量化 + LoRA | 最低 | 一般 |
+| 训练类型 | 说明 | 显存占用 | 训练效果 | 训练速度 |
+|---------|------|---------|---------|---------|
+| `full` | 全参数微调，更新模型所有参数 | 最高 | 最好 | 较慢 |
+| `lora` | LoRA 微调，只训练低秩适配器 | 较低 | 较好 | 较快 |
+| `qlora` | 量化 LoRA，4-bit 量化 + LoRA | 最低 | 一般 | 快 |
 
 **全参数微调 (full)**：
 - 更新模型的所有权重参数
@@ -147,6 +170,28 @@ torchrun --nproc_per_node=5 --no_python swift sft
 - 显存占用大幅降低（约 1/3 ~ 1/10）
 - 训练速度更快
 - 适合：显存有限、快速实验的场景
+
+---
+
+#### LoRA 专用参数
+
+```bash
+--lora_rank 64       # LoRA 秩
+--lora_alpha 128     # LoRA 缩放因子
+--lora_dropout 0.05  # LoRA dropout
+```
+
+| 参数 | 说明 | 推荐值 |
+|------|------|--------|
+| `lora_rank` | 低秩矩阵的秩，越大效果越好但显存越高 | 32-128 |
+| `lora_alpha` | 缩放因子，通常设为 rank 的 1-2 倍 | 64-256 |
+| `lora_dropout` | 防止过拟合的 dropout | 0.05-0.1 |
+
+**LoRA 原理简述**：
+- 原始权重矩阵 W (d×k) 保持冻结
+- 添加两个小矩阵 A (d×r) 和 B (r×k)，其中 r << min(d,k)
+- 实际计算：W' = W + A×B
+- 只训练 A 和 B，参数量从 d×k 降到 (d+k)×r
 
 ---
 
@@ -265,48 +310,50 @@ torchrun --nproc_per_node=5 --no_python swift sft
 
 ---
 
-#### `--per_device_train_batch_size 2`
+#### `--per_device_train_batch_size`
 
 **作用**：设置每个 GPU 上的训练批次大小。
 
-**详细说明**：
-- Batch Size = 每次梯度更新使用的样本数量
-- `per_device` 表示这是单个 GPU 的批次大小
-- 设置为 2 表示每个 GPU 每次处理 2 条数据
+**当前配置**：
+| 脚本 | 值 | 说明 |
+|------|-----|------|
+| LoRA 微调 | 4 | LoRA 显存占用低，可用更大 batch |
+| 全参数微调 | 2 | 全参数需要更多显存 |
 
 **批次大小的影响**：
 - 越大：训练越稳定，但显存占用越高
 - 越小：显存占用低，但训练可能不稳定
 
 **显存不足时的处理**：
-- 减小 batch_size（如从 2 改为 1）
+- 减小 batch_size（如从 4 改为 2）
 - 增大 gradient_accumulation_steps 来补偿
 
 ---
 
-#### `--per_device_eval_batch_size 1`
+#### `--per_device_eval_batch_size`
 
 **作用**：设置每个 GPU 上的评估批次大小。
 
 **详细说明**：
 - 评估时不需要计算梯度，显存占用比训练时少
-- 但为了安全起见，通常设置得比训练批次小
+- 可以设置得比训练批次大
 - 评估批次大小不影响模型效果，只影响评估速度
 
 ---
 
-#### `--gradient_accumulation_steps 8`
+#### `--gradient_accumulation_steps`
 
 **作用**：梯度累积步数，用于模拟更大的批次大小。
 
-**详细说明**：
-- 不是每个 batch 都更新参数，而是累积多个 batch 的梯度后再更新
-- 效果等同于使用更大的 batch size，但不增加显存
+**当前配置**：
+| 脚本 | batch_size | GPU数 | 累积步数 | 有效batch |
+|------|-----------|-------|---------|----------|
+| LoRA 微调 | 4 | 5 | 4 | 80 |
+| 全参数微调 | 2 | 5 | 8 | 80 |
 
 **有效批次大小计算**：
 ```
 有效批次大小 = per_device_train_batch_size × GPU数量 × gradient_accumulation_steps
-            = 2 × 5 × 8 = 80
 ```
 
 **为什么需要梯度累积**：
@@ -314,26 +361,17 @@ torchrun --nproc_per_node=5 --no_python swift sft
 - 但显存有限，无法直接使用大 batch
 - 梯度累积可以在不增加显存的情况下获得大 batch 的效果
 
-**示例**：
-```bash
-# 显存充足：直接用大 batch
---per_device_train_batch_size 16 --gradient_accumulation_steps 1
-
-# 显存有限：小 batch + 梯度累积
---per_device_train_batch_size 2 --gradient_accumulation_steps 8
-# 两者的有效 batch size 相同，但后者显存占用更低
-```
-
 ---
 
-#### `--learning_rate 1e-5`
+#### `--learning_rate`
 
 **作用**：设置学习率（Learning Rate）。
 
-**详细说明**：
-- 学习率决定了每次参数更新的步长
-- `1e-5` = 0.00001，这是一个较小的学习率
-- 大模型微调通常使用较小的学习率，避免破坏预训练知识
+**当前配置**：
+| 脚本 | 值 | 说明 |
+|------|-----|------|
+| LoRA 微调 | 1e-4 | LoRA 通常用较大学习率 |
+| 全参数微调 | 1e-5 | 全参数用较小学习率 |
 
 **学习率的影响**：
 - 太大：训练不稳定，loss 震荡或发散
@@ -457,7 +495,7 @@ torchrun --nproc_per_node=5 --no_python swift sft
 **详细说明**：
 - 只保留最近的 3 个检查点，更早的会被自动删除
 - 防止检查点占用过多磁盘空间
-- 30B 模型每个检查点约 60GB，3 个就是 180GB
+- 8B 模型每个检查点约 16GB（全参数）或 1GB（LoRA）
 
 **如何选择**：
 - 磁盘空间充足：可以设大一些（5-10）
@@ -484,20 +522,21 @@ Step 15: loss=1.987, lr=3e-6, speed=1.2 samples/s
 
 ---
 
-#### `--output_dir output_qwen3_30b_full`
+#### `--output_dir`
 
 **作用**：指定模型输出目录。
 
-**详细说明**：
-- 所有训练产物都会保存到这个目录
-- 包括：检查点、最终模型、训练日志、配置文件等
+**当前配置**：
+| 脚本 | 输出目录 |
+|------|---------|
+| LoRA 微调 | `output_qwen3_8b_lora` |
+| 全参数微调 | `output_qwen3_8b_full` |
 
 **目录结构示例**：
 ```
-output_qwen3_30b_full/
+output_qwen3_8b_lora/
 ├── checkpoint-50/          # 第 50 步的检查点
 ├── checkpoint-100/         # 第 100 步的检查点
-├── checkpoint-150/         # 第 150 步的检查点
 ├── runs/                   # TensorBoard 日志
 ├── trainer_state.json      # 训练状态
 ├── training_args.bin       # 训练参数
@@ -570,31 +609,46 @@ DeepSpeed 是微软开发的深度学习优化库，ZeRO（Zero Redundancy Optim
 | ZeRO-2 | 优化器状态 + 梯度 | 约 8x | 中 | 大规模模型 |
 | ZeRO-3 | 优化器状态 + 梯度 + 参数 | 约 16x | 高 | 超大规模模型 |
 
-**ZeRO-2 的工作原理**：
-1. 将优化器状态分片到各个 GPU
-2. 将梯度分片到各个 GPU
-3. 每个 GPU 只存储部分状态，需要时通过通信获取
-
-**为什么选择 ZeRO-2**：
-- ZeRO-1 节省不够多
-- ZeRO-3 通信开销太大，训练速度慢
-- ZeRO-2 是性能和显存的较好平衡
+**当前配置**：
+- 两个脚本都使用 **ZeRO-2**
+- 8B 模型不需要 ZeRO-3，ZeRO-2 通信开销更低，训练更快
 
 **使用建议**：
 ```bash
 # 模型较小（<10B），显存充足
-不使用 DeepSpeed 或使用 ZeRO-1
-
-# 模型中等（10B-70B）
 --deepspeed zero2
 
-# 模型超大（>70B）或显存非常紧张
---deepspeed zero3
+# 模型中等（10B-30B）
+--deepspeed zero2 或 zero3
+
+# 模型超大（>30B）或显存非常紧张
+--deepspeed zero3 或 zero3_offload
 ```
 
 ---
 
-## 四、完整训练流程图解
+## 四、两个脚本的参数对比
+
+| 参数 | LoRA 微调 | 全参数微调 | 说明 |
+|------|----------|-----------|------|
+| `--model` | Qwen/Qwen3-8B | Qwen/Qwen3-8B | 相同 |
+| `--train_type` | lora | full | 核心区别 |
+| `--lora_rank` | 64 | - | LoRA 专用 |
+| `--lora_alpha` | 128 | - | LoRA 专用 |
+| `--lora_dropout` | 0.05 | - | LoRA 专用 |
+| `--per_device_train_batch_size` | 4 | 2 | LoRA 可用更大 batch |
+| `--gradient_accumulation_steps` | 4 | 8 | 保持有效 batch 相同 |
+| `--learning_rate` | 1e-4 | 1e-5 | LoRA 用更大学习率 |
+| `--output_dir` | output_qwen3_8b_lora | output_qwen3_8b_full | 不同输出目录 |
+| `--deepspeed` | zero2 | zero2 | 相同 |
+
+**有效 batch size**：
+- LoRA：4 × 5 × 4 = 80
+- 全参数：2 × 5 × 8 = 80
+
+---
+
+## 五、完整训练流程图解
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -612,10 +666,11 @@ DeepSpeed 是微软开发的深度学习优化库，ZeRO（Zero Redundancy Optim
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  2. 加载模型和数据                                               │
-│     - 从 HuggingFace 下载 Qwen3-30B 模型                         │
+│     - 从 HuggingFace/ModelScope 下载 Qwen3-8B 模型               │
 │     - 以 bfloat16 精度加载模型权重                                │
 │     - 加载数据集的前 1000 条数据                                  │
 │     - 启用梯度检查点节省显存                                      │
+│     - [LoRA] 初始化 LoRA 适配器                                  │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -625,9 +680,9 @@ DeepSpeed 是微软开发的深度学习优化库，ZeRO（Zero Redundancy Optim
 │     ┌─────────────────────────────────────────────────────┐     │
 │     │  每一步（Step）:                                     │     │
 │     │  - 4 个 worker 并行加载数据                          │     │
-│     │  - 每个 GPU 处理 2 条数据                            │     │
-│     │  - 累积 8 步梯度后更新参数                           │     │
-│     │  - 有效 batch size = 2 × 5 × 8 = 80                 │     │
+│     │  - 每个 GPU 处理 batch_size 条数据                   │     │
+│     │  - 累积梯度后更新参数                                │     │
+│     │  - 有效 batch size = 80                             │     │
 │     └─────────────────────────────────────────────────────┘     │
 │                              │                                  │
 │     每 5 步：记录日志（loss、学习率等）                           │
@@ -638,7 +693,7 @@ DeepSpeed 是微软开发的深度学习优化库，ZeRO（Zero Redundancy Optim
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  4. 训练完成                                                     │
-│     - 保存最终模型到 output_qwen3_30b_full/                      │
+│     - 保存最终模型到 output_qwen3_8b_xxx/                        │
 │     - 只保留最近 3 个检查点                                      │
 │     - 输出训练统计信息                                           │
 └─────────────────────────────────────────────────────────────────┘
@@ -646,7 +701,7 @@ DeepSpeed 是微软开发的深度学习优化库，ZeRO（Zero Redundancy Optim
 
 ---
 
-## 五、常见问题与调优建议
+## 六、常见问题与调优建议
 
 ### 显存不足（OOM）怎么办？
 
@@ -675,4 +730,38 @@ DeepSpeed 是微软开发的深度学习优化库，ZeRO（Zero Redundancy Optim
 1. **减少训练轮数**：`--num_train_epochs 1`
 2. **增加数据量**
 3. **使用更小的学习率**
-4. **添加正则化（如 dropout）**
+4. **增大 LoRA dropout**：`--lora_dropout 0.1`
+
+---
+
+## 七、快速开始
+
+### LoRA 微调（推荐）
+
+```bash
+# 训练
+bash train_qwen3_lora.sh
+
+# 预计时间：5-10 分钟
+# 输出目录：output_qwen3_8b_lora/
+```
+
+### 全参数微调
+
+```bash
+# 训练
+bash train_qwen3_lora_fixed.sh
+
+# 预计时间：10-15 分钟
+# 输出目录：output_qwen3_8b_full/
+```
+
+### 监控训练
+
+```bash
+# 查看 GPU 使用情况
+watch -n 1 nvidia-smi
+
+# 查看训练日志
+tail -f output_qwen3_8b_lora/v*/logging.jsonl
+```
