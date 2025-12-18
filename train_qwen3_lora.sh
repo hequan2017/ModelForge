@@ -38,3 +38,11 @@ torchrun \
   --model_author swift \
   --model_name swift-robot \
   --deepspeed zero2
+
+
+
+CUDA_VISIBLE_DEVICES=0 swift infer \
+    --model Qwen/Qwen3-8B \
+    --adapters /data/output_qwen3_8b_lora/v0-20251218-170754/checkpoint-39 \
+    --stream true \
+    --temperature 0.7
